@@ -291,7 +291,7 @@ public class FIXMessageCodecRoundTripTest {
         for (byte b : (head + body).getBytes(cs)) {
             sum += b & 0xFF;
         }
-        return head + body + String.format("10=%03d", sum % 256) + SOH;
+        return head + body + String.format(Locale.ROOT, "10=%03d", sum % 256) + SOH;
     }
 
     private static IoBuffer encode(Object message) throws Exception {
