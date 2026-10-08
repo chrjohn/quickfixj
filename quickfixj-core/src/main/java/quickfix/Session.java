@@ -329,6 +329,14 @@ public class Session implements Closeable {
      */
     public static final String SETTING_ALLOW_UNKNOWN_MSG_FIELDS = "AllowUnknownMsgFields";
 
+    /**
+     * Allow field values that are not defined as enumerated values in the data
+     * dictionary, i.e. skip the validation of field values against the enumerated
+     * values defined for the field. Values of fields without enumerated values
+     * are not affected.
+     */
+    public static final String SETTING_ALLOW_UNKNOWN_ENUM_VALUES = "AllowUnknownEnumValues";
+
     public static final String SETTING_DEFAULT_APPL_VER_ID = "DefaultApplVerID";
 
     /**
@@ -1313,7 +1321,7 @@ public class Session implements Closeable {
 
     private void nextReject(Message reject) throws FieldNotFound, RejectLogon, IncorrectDataFormat,
             IncorrectTagValue, UnsupportedMessageType, IOException, InvalidMessage {
-        if (!verify(reject, false, validateSequenceNumbers)) {
+        if (!verify(reject, validateSequenceNumbers, validateSequenceNumbers)) {
             return;
         }
         if (getExpectedTargetNum() == reject.getHeader().getInt(MsgSeqNum.FIELD)) {
@@ -1834,6 +1842,7 @@ public class Session implements Closeable {
                     return false;
                 } else if (checkTooLow && isTargetTooLow(msgSeqNum)) {
                     doTargetTooLow(msg);
+                    stateListener.onPossDupMessageDiscarded(sessionID, msg);
                     return false;
                 }
             }
@@ -1841,6 +1850,7 @@ public class Session implements Closeable {
             // Handle poss dup where msgSeq is as expected
             // FIX 4.4 Vol 2, test case 2f&g
             if (isPossibleDuplicate(msg) && !validatePossDup(msg)) {
+                stateListener.onPossDupMessageDiscarded(sessionID, msg);
                 return false;
             }
 
@@ -1873,7 +1883,7 @@ public class Session implements Closeable {
         return true;
     }
 
-    private boolean doTargetTooLow(Message msg) throws FieldNotFound, IOException {
+    private void doTargetTooLow(Message msg) throws FieldNotFound, IOException {
         if (!isPossibleDuplicate(msg)) {
             final int msgSeqNum = msg.getHeader().getInt(MsgSeqNum.FIELD);
             final String text = "MsgSeqNum too low, expecting " + getExpectedTargetNum()
@@ -1881,7 +1891,7 @@ public class Session implements Closeable {
             generateLogout(text);
             throw new SessionException(text);
         }
-        return validatePossDup(msg);
+        validatePossDup(msg);
     }
 
     private void doBadCompID(Message msg) throws IOException, FieldNotFound {
@@ -1951,14 +1961,10 @@ public class Session implements Closeable {
      */
     public void next() throws IOException {
 
-        if (!isEnabled()) {
-            if (isLoggedOn()) {
-                if (!state.isLogoutSent()) {
-                    getLog().onEvent("Initiated logout request");
-                    generateLogout(state.getLogoutReason());
-                }
-            } else {
-                return;
+        if (!isEnabled() && isLoggedOn()) {
+            if (!state.isLogoutSent()) {
+                getLog().onEvent("Initiated logout request");
+                generateLogout(state.getLogoutReason());
             }
         }
 
@@ -1980,6 +1986,13 @@ public class Session implements Closeable {
                     resetIfSessionNotCurrent(sessionID, now);
                 }
             }
+        }
+
+        // https://github.com/quickfix-j/quickfixj/issues/965
+        // allow the session schedule block above to run even when session is disabled,
+        // so that sequence numbers are reset as scheduled.
+        if (!isEnabled() && !isLoggedOn()) {
+            return;
         }
 
         // Return if we are not connected
@@ -2025,7 +2038,13 @@ public class Session implements Closeable {
             } else {
                 getLog().onWarnEvent("Heartbeat failure detected but deactivated");
             }
-        } else {
+        } else if (isLoggedOn()) {
+            // #902: Only generate heartbeats/test requests when the session is
+            // fully established (Logon sent AND received). Generating a heartbeat
+            // in the window between setLogonReceived(true) and the acceptor's own
+            // outgoing Logon being sent would silently consume a sequence number
+            // via persist() without transmitting the message, causing the Logon
+            // response to carry the wrong MsgSeqNum.
             if (state.isTestRequestNeeded()) {
                 generateTestRequest("TEST");
                 getLog().onEvent("Sent test request TEST");
@@ -2088,7 +2107,6 @@ public class Session implements Closeable {
         }
         state.setLastReceivedTime(SystemTime.currentTimeMillis());
         state.clearTestRequestCounter();
-        state.setLogonSent(true);
         logonAttempts++;
 
         if (enableNextExpectedMsgSeqNum) {
@@ -2098,7 +2116,9 @@ public class Session implements Closeable {
         }
 
         setLogonTags(logon);
-        return sendRaw(logon, 0);
+        final boolean result = sendRaw(logon, 0);
+        state.setLogonSent(result);
+        return result;
     }
 
     /**
@@ -2631,8 +2651,7 @@ public class Session implements Closeable {
         }
 
         setLogonTags(logon);
-        sendRaw(logon, 0);
-        state.setLogonSent(true);
+        state.setLogonSent(sendRaw(logon, 0));
     }
 
     private void persist(Header header, String messageString, int num) throws IOException, FieldNotFound {
