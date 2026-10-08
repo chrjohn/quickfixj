@@ -232,6 +232,18 @@ public class FIXMessageCodecRoundTripTest {
         assertEquals(messages, out.messages);
     }
 
+    @Test
+    public void testChecksumUsesAsciiDigitsWithArabicDefaultLocale() throws Exception {
+        Locale defaultLocale = Locale.getDefault();
+        try {
+            Locale.setDefault(new Locale("ar", "EG"));
+            String message = fix("FIX.4.4", "35=0" + SOH);
+            assertTrue(message.endsWith("10=163" + SOH));
+        } finally {
+            Locale.setDefault(defaultLocale);
+        }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private static List<Object> decodeChunks(byte[]... chunks) throws Exception {
